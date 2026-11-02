@@ -1,0 +1,141 @@
+name: Verify Garage Release on GitHub
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to verify
+        required: false
+        default: v2.5.0
+permissions:
+  contents: read
+concurrency:
+  group: garage-release-verification
+  cancel-in-progress: false
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve tag
+        run: |
+          TAG="${{ github.event.inputs.tag }}"
+          if [ -z "$TAG" ]; then TAG="$(gh release view --json tagName --jq .tagName)"; fi
+          echo "RELEASE_TAG=$TAG" >> "$GITHUB_ENV"
+
+      - name: Download exact Release asset on runner
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          ASSET_NAME="community.lazycat.app.garage-${RELEASE_TAG}.lpk"
+          echo "ASSET_NAME=$ASSET_NAME" >> "$GITHUB_ENV"
+          gh release view "$RELEASE_TAG" --json tagName,assets > release-metadata.json
+          gh release download "$RELEASE_TAG" --pattern "$ASSET_NAME" --dir verify-pkg
+
+      - name: Verify package contents
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, tarfile, yaml
+
+          tag = os.environ['RELEASE_TAG']
+          name = os.environ['ASSET_NAME']
+          pkg = __import__('pathlib').Path('verify-pkg') / name
+          assert pkg.is_file(), pkg
+
+          h = hashlib.sha256()
+          with pkg.open('rb') as fh:
+              for chunk in iter(lambda: fh.read(1 << 20), b''):
+                  h.update(chunk)
+
+          with tarfile.open(pkg, 'r:') as package:
+              members = package.getnames()
+              for required in ('manifest.yml', 'package.yml', 'content.tar', 'icon.png'):
+                  assert required in members, (required, members)
+
+              info = yaml.safe_load(package.extractfile('package.yml').read())
+              assert info['package'] == 'community.lazycat.app.garage', info['package']
+              assert info['name'] == 'Garage', info['name']
+              assert info['version'] == tag.lstrip('v'), (info['version'], tag)
+              assert info['license'] == 'AGPL-3.0', info['license']
+              assert info['min_os_version'] == '1.5.0', info['min_os_version']
+
+              raw = package.extractfile('manifest.yml').read().decode()
+              m = yaml.safe_load(raw)
+              app = m['application']
+              assert app['subdomain'] == 'garage', app['subdomain']
+              ups = app['upstreams']
+              assert any(u['location'] == '/' and 'garage-webui:3919' in (u.get('backend') or '')
+                         for u in ups), ups
+              for u in ups:
+                  b = u.get('backend') or ''
+                  assert ':3903' not in b and ':3900' not in b, b
+
+              svcs = m['services']
+              assert set(svcs) == {'garage', 'auth-init', 'garage-webui'}, set(svcs)
+
+              g = svcs['garage']
+              assert g['image'].startswith('docker.1ms.run/dxflrs/garage:'), g['image']
+              assert g['image'].endswith(':' + tag), g['image']
+              genv = ' '.join(str(x) for x in g['environment'])
+              assert 'GARAGE_RPC_SECRET=' in genv and 'stable_secret' in genv, genv
+              assert 'GARAGE_ADMIN_TOKEN=' in genv, genv
+              assert any(b.endswith(':/var/lib/garage') for b in g['binds']), g['binds']
+              assert g.get('entrypoint') == ['/lzcapp/pkg/content/entrypoint.sh'], g.get('entrypoint')
+
+              ui = svcs['garage-webui']
+              assert ui['image'].startswith('docker.1ms.run/khairul169/garage-webui:'), ui['image']
+              assert ui.get('entrypoint') == ['/lzcapp/pkg/content/webui-entrypoint.sh'], ui.get('entrypoint')
+              uienv = ' '.join(str(x) for x in ui['environment'])
+              assert 'API_BASE_URL=http://garage:3903' in uienv, uienv
+              assert 'AUTH_FILE=' in uienv, uienv
+
+              ai = svcs['auth-init']
+              assert 'httpd:alpine' in ai['image'], ai['image']
+              ai_cmd = ' '.join(str(x) for x in ai.get('entrypoint', []))
+              assert 'htpasswd' in ai_cmd, ai_cmd
+              assert '-B' in ai_cmd, ai_cmd
+              assert any(b.endswith(':/auth') for b in ai['binds']), ai['binds']
+              assert any(b.endswith(':/auth') for b in ui['binds']), ui['binds']
+
+              params = yaml.safe_load(package.extractfile('deploy_params.yml').read())
+              by_id = {q['id']: q for q in params['params']}
+              assert set(by_id) == {'admin_username', 'admin_password'}, set(by_id)
+              assert by_id['admin_password']['type'] == 'secret'
+              assert 'random' in str(by_id['admin_password'].get('default_value', ''))
+              refs = set(re.findall(r'\.U\.([A-Za-z0-9_]+)', raw))
+              assert refs <= set(by_id), (refs, set(by_id))
+
+              assert 'lzc-file-chooser' not in raw
+              assert 'usage' in m and str(m['usage']).strip(), 'usage section missing'
+              usage_text = str(m['usage'])
+              assert ('真机验证' in usage_text or '实机验证' in usage_text), 'usage must state no device test'
+
+              with tarfile.open(fileobj=package.extractfile('content.tar')) as content:
+                  cmembers = content.getnames()
+                  lic = [n for n in cmembers if 'licenses/' in n]
+                  assert lic, cmembers
+                  main_lic = [n for n in lic if n.endswith('/LICENSE')]
+                  target = main_lic[0] if main_lic else lic[0]
+                  license_text = content.extractfile(target).read().decode()
+                  assert 'GNU AFFERO GENERAL PUBLIC LICENSE' in license_text, license_text[:120]
+
+                  scripts = [n for n in cmembers if n.endswith('entrypoint.sh')]
+                  assert len(scripts) >= 2, scripts
+                  joined = ' '.join(content.extractfile(s).read().decode() for s in scripts)
+                  assert 'layout assign' in joined, 'layout bootstrap missing'
+                  assert 'layout apply' in joined, 'layout apply missing'
+
+          result = {
+              'verified': True,
+              'tag': tag,
+              'sha256': h.hexdigest(),
+              'size': pkg.stat().st_size,
+              'runtime_tested': False,
+              'note': 'layout bootstrap + bcrypt auth init container both verified in-package',
+          }
+          print(json.dumps(result))
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write('```json\n' + json.dumps(result, indent=2) + '\n```\n')
+          PY
