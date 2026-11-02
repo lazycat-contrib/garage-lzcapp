@@ -1,0 +1,18 @@
+package: community.lazycat.app.garage
+name: Garage
+version: 0.0.0
+description: "Self-hosted S3-compatible object storage: a small, distributed alternative to MinIO."
+min_os_version: "1.5.0"
+homepage: https://garagehq.deuxfleurs.fr/
+author: Deuxfleurs
+license: AGPL-3.0
+permissions:
+  required:
+    - net.internet
+locales:
+  zh:
+    name: Garage
+    description: "自托管的 S3 兼容对象存储：轻量、省资源，可替代 MinIO 存放文件和备份。"
+  en:
+    name: Garage
+    description: "Self-hosted S3-compatible object storage: a small, distributed alternative to MinIO."

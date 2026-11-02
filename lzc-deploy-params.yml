@@ -1,0 +1,21 @@
+params:
+  - id: admin_username
+    type: string
+    name: UI username
+    description: "Username for the Garage web UI."
+    default_value: "admin"
+    optional: false
+  - id: admin_password
+    type: secret
+    name: UI password
+    description: "Password for the Garage web UI, at least 12 characters."
+    default_value: "$random(len=20)"
+    optional: false
+locales:
+  zh:
+    admin_username:
+      name: 界面用户名
+      description: 用于保护 Garage 网页界面的用户名。
+    admin_password:
+      name: 界面密码
+      description: 用于保护 Garage 网页界面的密码，至少 12 位。默认随机生成。

@@ -1,0 +1,46 @@
+application:
+  subdomain: garage
+  multi_instance: false
+  upstreams:
+    - location: /package-licenses/
+      backend: file:///lzcapp/pkg/content/licenses/
+    # The S3 port (3900) speaks the S3 protocol and the admin port (3903) needs
+    # a bearer token, so neither is usable as a web page. The UI container
+    # fronts both and is what a browser can actually open.
+    - location: /
+      backend: http://garage-webui:3919/
+
+services:
+  garage:
+    # upstream: dxflrs/garage:v2.5.0
+    image: docker.1ms.run/dxflrs/garage:v2.5.0
+    entrypoint:
+      - /lzcapp/pkg/content/entrypoint.sh
+    environment:
+      # Node-to-node secret; must stay constant or the cluster identity breaks.
+      - |-
+        GARAGE_RPC_SECRET={{ stable_secret "garage_rpc_secret" | replace "\r" "" | replace "\n" "" }}
+      # Token required by the admin API.
+      - |-
+        GARAGE_ADMIN_TOKEN={{ stable_secret "garage_admin_token" | replace "\r" "" | replace "\n" "" }}
+      - TZ=Asia/Shanghai
+    binds:
+      # config, metadata (node identity + layout) and stored objects all live here
+      - /lzcapp/var/garage:/var/lib/garage
+      - /lzcapp/pkg/content:/lzcapp/pkg/content:ro
+
+  garage-webui:
+    # upstream: khairul169/garage-webui:1.1.0
+    # Reads the same garage.toml the server writes, so the admin key does not
+    # have to be duplicated into this container.
+    image: docker.1ms.run/khairul169/garage-webui:1.1.0
+    depends_on:
+      - garage
+    environment:
+      - CONFIG_PATH=/etc/garage.toml
+      - API_BASE_URL=http://garage:3903
+      - S3_ENDPOINT_URL=http://garage:3900
+      - PORT=3919
+      - TZ=Asia/Shanghai
+    binds:
+      - /lzcapp/var/garage/garage.toml:/etc/garage.toml:ro
