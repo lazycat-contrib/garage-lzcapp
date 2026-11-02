@@ -5,8 +5,8 @@ application:
     - location: /package-licenses/
       backend: file:///lzcapp/pkg/content/licenses/
     # The S3 port (3900) speaks the S3 protocol and the admin port (3903) needs
-    # a bearer token, so neither is usable as a web page. The UI container
-    # fronts both and is what a browser can actually open.
+    # a bearer token, so neither is usable as a page. The UI container fronts
+    # both and is what a browser can actually open.
     - location: /
       backend: http://garage-webui:3919/
 
@@ -29,18 +29,76 @@ services:
       - /lzcapp/var/garage:/var/lib/garage
       - /lzcapp/pkg/content:/lzcapp/pkg/content:ro
 
+  # The UI expects AUTH_USER_PASS as "<user>:<bcrypt hash>" and disables
+  # authentication entirely when it is empty. bcrypt cannot be computed from a
+  # YAML template, so this short-lived container mints the hash with htpasswd
+  # (from httpd-tools) and writes it to a volume shared with the UI.
+  auth-init:
+    image: docker.1ms.run/library/httpd:alpine
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        mkdir -p /auth
+        if [ -s /auth/userauth ]; then
+          echo "auth-init: credentials already present, keeping them"
+          exit 0
+        fi
+        htpasswd -nbB "$UI_USERNAME" "$UI_PASSWORD" | tr -d ':\n' > /auth/userauth
+        chmod 0644 /auth/userauth
+        echo "auth-init: credentials written"
+    environment:
+      - |-
+        UI_USERNAME={{ .U.admin_username }}
+      - |-
+        UI_PASSWORD={{ .U.admin_password }}
+    binds:
+      - /lzcapp/var/auth:/auth
+
   garage-webui:
     # upstream: khairul169/garage-webui:1.1.0
-    # Reads the same garage.toml the server writes, so the admin key does not
-    # have to be duplicated into this container.
     image: docker.1ms.run/khairul169/garage-webui:1.1.0
     depends_on:
       - garage
+      - auth-init
+    entrypoint:
+      - /lzcapp/pkg/content/webui-entrypoint.sh
     environment:
       - CONFIG_PATH=/etc/garage.toml
       - API_BASE_URL=http://garage:3903
       - S3_ENDPOINT_URL=http://garage:3900
       - PORT=3919
+      - AUTH_FILE=/auth/userauth
       - TZ=Asia/Shanghai
     binds:
       - /lzcapp/var/garage/garage.toml:/etc/garage.toml:ro
+      - /lzcapp/var/auth:/auth
+      - /lzcapp/pkg/content:/lzcapp/pkg/content:ro
+
+usage: |
+  Garage 是自托管的 S3 兼容对象存储：可以理解为自己家里的一个小 S3。
+
+  使用方法：
+  1. 打开应用，用你安装时设置的用户名和密码登录网页界面。
+  2. 在界面里新建 bucket（存储桶），再创建访问密钥（Access Key）。
+  3. 用任意 S3 客户端连接，端点填 https://你的域名/s3 ，或容器内的 http://garage:3900 。
+     常用工具都可以：rclone、s3cmd、AWS CLI、MinIO 客户端，以及支持 S3 的备份软件。
+  4. 在界面上可以查看桶、对象、密钥和集群状态。
+
+  数据与安全：
+  - 元数据、对象数据和配置都在 /lzcapp/var/garage，卸载应用会一并删除，**请务必备份**。
+  - 网页界面由你设置的用户名和密码保护；密码默认随机生成，不存在内置弱口令。
+  - 首次启动会自动完成集群布局初始化（layout assign + apply），
+    否则虽能启动但无法创建存储桶。
+  - RPC 密钥与管理令牌由平台稳定密钥生成，每个部署不同；**请勿改动**，
+    否则节点身份与已发的访问密钥会失效。
+  - 应用经懒猫入口鉴权访问。
+
+  说明：
+  - 三个容器：Garage 本体 + 网页界面 + 一次性凭据初始化容器。
+  - 本部署 replication_factor=1（单节点），不提供副本冗余；
+    重要数据请另做备份，不要依赖它做唯一副本。
+  - S3 端口 3900 与后台端口 3903 只在容器内网开放，不对外暴露。
+  - 未做真机验证：登录、建桶、S3 客户端连接、布局初始化以及重启后持久化
+    均未在设备上实测。
