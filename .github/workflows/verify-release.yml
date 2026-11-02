@@ -94,8 +94,10 @@ jobs:
               ai = svcs['auth-init']
               assert 'httpd:alpine' in ai['image'], ai['image']
               ai_cmd = ' '.join(str(x) for x in ai.get('entrypoint', []))
-              assert 'htpasswd' in ai_cmd, ai_cmd
-              assert '-B' in ai_cmd, ai_cmd
+              assert 'htpasswd' in ai_cmd, 'htpasswd not invoked'
+              # -B asks htpasswd for bcrypt; it is usually written as -nbB
+              assert 'nbB' in ai_cmd or ' -B' in ai_cmd, ai_cmd
+              assert '/auth/userauth' in ai_cmd, 'credential path missing'
               assert any(b.endswith(':/auth') for b in ai['binds']), ai['binds']
               assert any(b.endswith(':/auth') for b in ui['binds']), ui['binds']
 
